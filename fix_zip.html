@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>MA ZIP Code Reparatur - Projektstudium</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; max-width: 850px; margin: 0 auto; background-color: #f4f6f8; color: #333; line-height: 1.5; }
+        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        
+        h1 { margin-top: 0; color: #2c3e50; text-align: center; }
+        
+        /* Info-Box Style */
+        .info-box { background-color: #e3f2fd; border-left: 5px solid #2196F3; padding: 15px; border-radius: 4px; margin-bottom: 20px; font-size: 0.95rem; }
+        
+        /* Projekt-Credit Style */
+        .project-credit { background-color: #f8f9fa; border: 1px solid #e9ecef; padding: 15px; border-radius: 6px; margin-bottom: 30px; text-align: center; font-style: italic; color: #555; font-size: 0.9rem; }
+        .project-credit strong { color: #333; font-style: normal; display: block; margin-bottom: 5px; }
+
+        .step { margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
+        .step:last-child { border-bottom: none; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: #555; }
+        select, input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; margin-bottom: 10px; box-sizing: border-box; }
+        
+        .btn { background-color: #007BFF; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; transition: background 0.2s; display: inline-block; text-decoration: none; text-align: center; }
+        .btn:hover { background-color: #0056b3; }
+        .btn:disabled { background-color: #b0c4de; cursor: not-allowed; }
+        .btn-success { background-color: #28a745; }
+        .btn-success:hover { background-color: #218838; }
+        
+        #status { margin-top: 20px; white-space: pre-wrap; font-family: monospace; background: #2d3436; color: #dfe6e9; padding: 15px; border-radius: 6px; max-height: 250px; overflow-y: auto; display: none; }
+        .hidden { display: none; }
+        .progress-container { width: 100%; background-color: #e9ecef; border-radius: 6px; margin-top: 15px; height: 10px; overflow: hidden; display: none; }
+        .progress-bar { height: 100%; background-color: #007BFF; width: 0%; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🔧 MA ZIP Code Reparatur Tool</h1>
+
+    <div class="info-box">
+        <strong>Funktionsweise:</strong><br>
+        Synthetische Datensätze (z.B. von Synthea) weisen oft Lücken in den Adressdaten auf (PLZ = 00000). 
+        Dieses Tool analysiert die hochgeladene CSV-Datei, identifiziert fehlende Postleitzahlen und ergänzt diese automatisch 
+        durch eine Abfrage öffentlicher Geodatenbanken basierend auf dem hinterlegten Städtenamen (Massachusetts). 
+        Die Datenstruktur bleibt dabei vollständig erhalten.
+    </div>
+
+    <div class="project-credit">
+        <strong>Selbsterstelltes zugeschnittenes Tool von Jakob Stoll für das Projektstudium</strong>
+        (Technische Ansätze zur Anonymisierung medizinischer Daten: Im Spannungsfeld zwischen Datenschutz und Datenverfügbarkeit)
+    </div>
+    
+    <hr style="border: 0; border-top: 1px solid #eee; margin-bottom: 25px;">
+
+    <div class="step">
+        <label for="csvFile">1. CSV-Datei auswählen</label>
+        <input type="file" id="csvFile" accept=".csv" onchange="handleFileSelect()" />
+    </div>
+
+    <div id="mappingArea" class="step hidden">
+        <h3>2. Spalten zuordnen</h3>
+        <p style="font-size: 0.9rem; color: #666;">Das Tool versucht, die richtigen Spalten automatisch zu erkennen. Bitte kurz prüfen.</p>
+        
+        <label for="cityCol">Spalte mit STADT (City):</label>
+        <select id="cityCol"></select>
+
+        <label for="zipCol">Spalte mit PLZ (Zip Code):</label>
+        <select id="zipCol"></select>
+
+        <br><br>
+        <button id="processBtn" class="btn" onclick="startProcessing()">Reparatur starten</button>
+    </div>
+
+    <div class="progress-container" id="progressContainer">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <div id="status"></div>
+
+    <div id="resultArea" class="step hidden" style="text-align: center; margin-top: 20px;">
+        <h3 style="color: #28a745;">Fertig!</h3>
+        <p id="summaryText"></p>
+        <a id="downloadLink" class="btn btn-success">⬇️ Korrigierte Datei herunterladen</a>
+    </div>
+</div>
+
+<script>
+    // --- FUNKTIONSLOGIK (Unverändert) ---
+    const API_BASE = "https://api.zippopotam.us/us/ma/";
+    let csvData = [];
+    let metaData = {};
+    let headers = [];
+    let cityZipMap = {}; 
+
+    function log(msg) {
+        const status = document.getElementById('status');
+        status.style.display = 'block';
+        status.innerText += msg + "\n";
+        status.scrollTop = status.scrollHeight;
+    }
+
+    function handleFileSelect() {
+        const fileInput = document.getElementById('csvFile');
+        const file = fileInput.files[0];
+        
+        if (!file) return;
+
+        document.getElementById('mappingArea').classList.add('hidden');
+        document.getElementById('resultArea').classList.add('hidden');
+        document.getElementById('status').style.display = 'none';
+        document.getElementById('status').innerText = '';
+
+        Papa.parse(file, {
+            header: true,
+            preview: 1, 
+            skipEmptyLines: true,
+            complete: function(results) {
+                if (results.meta && results.meta.fields) {
+                    headers = results.meta.fields;
+                    fillDropdowns(headers);
+                    loadFileFull(file);
+                } else {
+                    alert("Konnte keine Spaltenüberschriften finden. Ist die Datei korrekt?");
+                }
+            }
+        });
+    }
+
+    function loadFileFull(file) {
+        Papa.parse(file, {
+            header: true,
+            skipEmptyLines: true,
+            complete: function(results) {
+                csvData = results.data;
+                metaData = results.meta;
+                log(`Datei geladen. ${csvData.length} Zeilen erkannt.`);
+            }
+        });
+    }
+
+    function fillDropdowns(fields) {
+        const citySelect = document.getElementById('cityCol');
+        const zipSelect = document.getElementById('zipCol');
+        
+        citySelect.innerHTML = '';
+        zipSelect.innerHTML = '';
+
+        fields.forEach(field => {
+            const option1 = new Option(field, field);
+            const option2 = new Option(field, field);
+            citySelect.add(option1);
+            zipSelect.add(option2);
+        });
+
+        selectOptionByText(citySelect, ['city', 'stadt', 'town', 'ort']);
+        selectOptionByText(zipSelect, ['zip', 'plz', 'postcode', 'postal']);
+
+        document.getElementById('mappingArea').classList.remove('hidden');
+    }
+
+    function selectOptionByText(selectElement, keywords) {
+        for (let i = 0; i < selectElement.options.length; i++) {
+            const text = selectElement.options[i].text.toLowerCase();
+            if (keywords.some(k => text.includes(k))) {
+                selectElement.selectedIndex = i;
+                return;
+            }
+        }
+    }
+
+    async function startProcessing() {
+        const cityCol = document.getElementById('cityCol').value;
+        const zipCol = document.getElementById('zipCol').value;
+
+        if (cityCol === zipCol) {
+            if(!confirm("Sie haben für Stadt und PLZ die gleiche Spalte gewählt. Sind Sie sicher?")) return;
+        }
+
+        document.getElementById('processBtn').disabled = true;
+        document.getElementById('progressContainer').style.display = 'block';
+
+        let missingCities = new Set();
+        let rowsToFix = 0;
+
+        csvData.forEach(row => {
+            let zipVal = row[zipCol];
+            if (!zipVal || zipVal == "0" || zipVal == "00000" || zipVal.trim() === "") {
+                if (row[cityCol]) {
+                    missingCities.add(row[cityCol].trim());
+                    rowsToFix++;
+                }
+            }
+        });
+
+        if (rowsToFix === 0) {
+            log("Alles sieht gut aus! Keine fehlenden PLZ gefunden.");
+            finishProcessing(0, 0);
+            return;
+        }
+
+        log(`${rowsToFix} fehlende Einträge gefunden.`);
+        log(`${missingCities.size} Städte werden abgefragt...`);
+
+        const citiesArray = Array.from(missingCities);
+        
+        for (let i = 0; i < citiesArray.length; i++) {
+            const city = citiesArray[i];
+            await fetchZipForCity(city);
+            
+            const pct = Math.round(((i + 1) / citiesArray.length) * 100);
+            document.getElementById('progressBar').style.width = pct + "%";
+            
+            await new Promise(r => setTimeout(r, 50)); 
+        }
+
+        let fixedCount = 0;
+        let notFixedCount = 0;
+
+        csvData.forEach(row => {
+            let zipVal = row[zipCol];
+            if (!zipVal || zipVal == "0" || zipVal == "00000" || zipVal.trim() === "") {
+                const city = row[cityCol] ? row[cityCol].trim() : "";
+                if (cityZipMap[city]) {
+                    row[zipCol] = cityZipMap[city];
+                    fixedCount++;
+                } else {
+                    notFixedCount++;
+                }
+            }
+        });
+
+        finishProcessing(fixedCount, notFixedCount);
+    }
+
+    async function fetchZipForCity(city) {
+        let cleanCity = city.split(",")[0].trim(); 
+        const url = `${API_BASE}${encodeURIComponent(cleanCity)}`;
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error("404");
+            const data = await response.json();
+            if (data.places && data.places.length > 0) {
+                cityZipMap[city] = data.places[0]["post code"];
+                log(`✓ ${city} -> ${cityZipMap[city]}`);
+            }
+        } catch (e) {
+            log(`✗ Nichts gefunden für: ${city}`);
+        }
+    }
+
+    function finishProcessing(fixed, failed) {
+        document.getElementById('summaryText').innerText = 
+            `Erfolgreich korrigiert: ${fixed} Datensätze.\nNicht gefunden: ${failed} Datensätze.`;
+        
+        const csv = Papa.unparse(csvData, {
+            delimiter: metaData.delimiter || ";",
+        });
+
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.getElementById('downloadLink');
+        
+        link.href = url;
+        link.download = 'fixed_data.csv';
+        
+        document.getElementById('resultArea').classList.remove('hidden');
+        document.getElementById('processBtn').disabled = false;
+    }
+</script>
+
+</body>
+</html>

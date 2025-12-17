@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARX CSV Transformer (Flattening)</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; background: #f4f4f4; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; color: #333; }
+        .step { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 4px; }
+        .step-title { font-weight: bold; margin-bottom: 10px; display: block; color: #0056b3; }
+        select, input[type="file"], button { width: 100%; padding: 10px; margin-top: 5px; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #status { margin-top: 10px; font-weight: bold; color: #555; }
+        .col-list { max-height: 200px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; background: #fff; }
+        .col-item { display: block; margin: 5px 0; }
+        .info { font-size: 0.9em; color: #666; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>CSV "Patienten-Falter" für ARX</h2>
+    <p>Wandelt "1 Zeile pro Diagnose" in "1 Zeile pro Patient" um.</p>
+
+    <div class="step">
+        <span class="step-title">1. CSV Datei wählen</span>
+        <input type="file" id="fileInput" accept=".csv,.txt">
+        <div class="info">Trennzeichen wird automatisch erkannt (Semikolon oder Komma).</div>
+    </div>
+
+    <div class="step" id="columnStep" style="display:none;">
+        <span class="step-title">2. Konfiguration</span>
+        
+        <label><strong>Woran erkennt man einen Patienten? (Gruppieren nach):</strong><br>
+        <small>Wählen Sie ID, Geburtsdatum, PLZ etc.</small></label>
+        <div id="groupByContainer" class="col-list"></div>
+
+        <br>
+
+        <label><strong>Was soll gesammelt werden? (Zu aggregieren):</strong><br>
+        <small>Wählen Sie die Krankheit/Diagnose.</small></label>
+        <select id="targetSelect"></select>
+    </div>
+
+    <div class="step" id="actionStep" style="display:none;">
+        <button id="processBtn">Konvertieren & Downloaden</button>
+        <div id="status"></div>
+    </div>
+</div>
+
+<script>
+    let fileData = null;
+    let headers = [];
+    let separator = ';';
+    let lines = [];
+
+    document.getElementById('fileInput').addEventListener('change', handleFile);
+    document.getElementById('processBtn').addEventListener('click', processData);
+
+    function handleFile(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            const text = event.target.result;
+            // Einfache Trennung (berücksichtigt keine Zeilenumbrüche INNERHALB von Zellen, was für diesen Zweck meist reicht)
+            lines = text.split(/\r\n|\n/).filter(line => line.trim() !== '');
+            
+            if (lines.length < 2) {
+                alert("Datei scheint leer oder ungültig zu sein.");
+                return;
+            }
+
+            // Separator erkennen
+            const firstLine = lines[0];
+            separator = (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length ? ';' : ',';
+            
+            headers = firstLine.split(separator).map(h => h.replace(/"/g, '').trim());
+
+            renderColumns();
+            document.getElementById('columnStep').style.display = 'block';
+            document.getElementById('actionStep').style.display = 'block';
+            document.getElementById('status').innerText = `Datei geladen. ${lines.length} Zeilen erkannt. Trennzeichen: "${separator}"`;
+        };
+        reader.readAsText(file);
+    }
+
+    function renderColumns() {
+        const groupContainer = document.getElementById('groupByContainer');
+        const targetSelect = document.getElementById('targetSelect');
+        
+        groupContainer.innerHTML = '';
+        targetSelect.innerHTML = '';
+
+        headers.forEach((header, index) => {
+            // Checkbox für Group By
+            const div = document.createElement('div');
+            div.className = 'col-item';
+            div.innerHTML = `<label><input type="checkbox" value="${index}" ${header.toUpperCase().includes('ID') || header.toUpperCase().includes('PATIENT') ? 'checked' : ''}> ${header}</label>`;
+            groupContainer.appendChild(div);
+
+            // Option für Target
+            const option = document.createElement('option');
+            option.value = index;
+            option.text = header;
+            if (header.toUpperCase().includes('DESCRIPTION') || header.toUpperCase().includes('KRANKHEIT') || header.toUpperCase().includes('DIAGNOSES')) {
+                option.selected = true;
+            }
+            targetSelect.appendChild(option);
+        });
+    }
+
+    function processData() {
+        const btn = document.getElementById('processBtn');
+        btn.disabled = true;
+        btn.innerText = "Verarbeite...";
+
+        // Verzögerung damit UI updated
+        setTimeout(() => {
+            try {
+                const groupIndices = Array.from(document.querySelectorAll('#groupByContainer input:checked')).map(cb => parseInt(cb.value));
+                const targetIndex = parseInt(document.getElementById('targetSelect').value);
+
+                if (groupIndices.length === 0) {
+                    alert("Bitte wählen Sie mindestens eine Spalte zum Gruppieren (z.B. ID).");
+                    btn.disabled = false; btn.innerText = "Konvertieren & Downloaden";
+                    return;
+                }
+
+                // Map für die Aggregation: Key = Unique Group String, Value = Set of Diseases
+                const map = new Map();
+                // Speichern der nicht-aggregierten Daten für den Export
+                const metaMap = new Map(); 
+
+                // Start bei 1 um Header zu überspringen
+                for (let i = 1; i < lines.length; i++) {
+                    const cols = lines[i].split(separator).map(c => c.replace(/"/g, '').trim());
+                    if (cols.length < headers.length) continue;
+
+                    // Baue den Key (z.B. "ID123|1990|80331")
+                    const keyParts = groupIndices.map(idx => cols[idx]);
+                    const key = keyParts.join('|');
+                    const value = cols[targetIndex];
+
+                    if (!map.has(key)) {
+                        map.set(key, new Set());
+                        // Speichere die Metadaten für diesen Key (nur beim ersten Mal nötig)
+                        metaMap.set(key, keyParts);
+                    }
+                    if (value) map.get(key).add(value);
+                }
+
+                // CSV bauen
+                // Header: Gewählte Gruppen-Spalten + Ziel-Spalte
+                const outputHeader = groupIndices.map(i => headers[i]).join(separator) + separator + headers[targetIndex];
+                let outputCSV = outputHeader + "\n";
+
+                map.forEach((diseasesSet, key) => {
+                    const metaCols = metaMap.get(key);
+                    // Diseases mit Komma verbinden (und Anführungszeichen drumherum für CSV Sicherheit)
+                    const diseaseString = Array.from(diseasesSet).join(", ");
+                    
+                    // Zeile zusammenbauen
+                    const row = metaCols.join(separator) + separator + `"${diseaseString}"`;
+                    outputCSV += row + "\n";
+                });
+
+                downloadCSV(outputCSV, "ARX_Input_Optimiert.csv");
+                
+                document.getElementById('status').innerText = `Fertig! ${map.size} Patienten exportiert.`;
+            } catch (err) {
+                console.error(err);
+                alert("Ein Fehler ist aufgetreten: " + err.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Konvertieren & Downloaden";
+            }
+        }, 100);
+    }
+
+    function downloadCSV(content, fileName) {
+        const blob = new window.Blob([content], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.setAttribute('download', fileName);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+</script>
+
+</body>
+</html>
